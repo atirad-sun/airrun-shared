@@ -10,7 +10,7 @@
 export const BRAND_GREEN = "#04dc9a";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AQI band thresholds (EPA, post-May 2024)
+// AQI band thresholds (Thai PCD)
 //
 // Authoritative breakpoints live in `aqi.ts` (PM25_BREAKPOINTS). These are
 // the integer AQI cutoffs for band classification — exposed here for places
@@ -18,10 +18,9 @@ export const BRAND_GREEN = "#04dc9a";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const AQI_BAND_LIMITS = {
+  VeryGood: 25,
   Good: 50,
   Moderate: 100,
-  USG: 150,
-  Unhealthy: 200,
-  VeryUnhealthy: 300,
-  Hazardous: 500,
+  Sensitive: 200,
+  Unhealthy: 500, // open-ended in PCD; capped for display
 } as const;

@@ -1,39 +1,35 @@
 /**
- * US EPA Air Quality Index (AQI) — PM2.5 (24-hour) computation.
+ * Thai PCD Air Quality Index — PM2.5 (24-hour) computation.
  *
- * Source: EPA-454/B-24-002 (May 2024) "Technical Assistance Document for the
- * Reporting of Daily Air Quality – the Air Quality Index (AQI)", Table 6 and
- * Equation 1. Effective May 6, 2024 (89 FR 16202).
+ * Source: กรมควบคุมมลพิษ (Pollution Control Department) Thailand
+ * https://www.pcd.go.th/air-quality/
  *
- * Bangkok runners are the target audience: pollution data comes from Air4Thai
- * stations as raw PM2.5 μg/m³, and we display a unified EPA AQI computed from
- * those values so the number matches what users see on iqair.com / aqicn.org.
+ * เกณฑ์ PM2.5 มาตรฐานไทย (ค่าเฉลี่ย 24 ชั่วโมง):
+ *   ดีมาก   0.0 – 15.0 μg/m³  → Thai AQI   0–25
+ *   ดี      15.1 – 25.0 μg/m³  → Thai AQI  26–50
+ *   ปานกลาง 25.1 – 37.5 μg/m³  → Thai AQI  51–100
+ *   เริ่มมีผลต่อสุขภาพ 37.6 – 75.0 μg/m³ → Thai AQI 101–200
+ *   มีผลต่อสุขภาพ     75.1+  μg/m³       → Thai AQI 201+
  *
- * Backend (`fetch-aqi` cron) still writes a legacy Thai PCD `aqi_status` enum
- * to the DB, which the frontend now ignores in favor of the band derived here.
+ * Data sources wired by backend: PCD Thailand, WAQI, OpenWeatherMap.
+ * All three provide raw PM2.5 μg/m³ — pass it directly to computeAqi().
+ *
+ * Note: aqi field in AqiResult is now Thai AQI (0–201+ scale), not US EPA (0–500).
  */
 
 export type AqiBand =
-  | "Good"
-  | "Moderate"
-  | "USG"
-  | "Unhealthy"
-  | "VeryUnhealthy"
-  | "Hazardous";
+  | "VeryGood"   // ดีมาก  — ฟ้า
+  | "Good"       // ดี     — เขียว
+  | "Moderate"   // ปานกลาง — เหลือง
+  | "Sensitive"  // เริ่มมีผลต่อสุขภาพ — ส้ม
+  | "Unhealthy"; // มีผลต่อสุขภาพ — แดง
 
 export interface AqiResult {
-  aqi: number; // integer 0–500
+  aqi: number;   // Thai AQI integer (0–201+)
   band: AqiBand;
-  pm25: number; // truncated to 1 decimal
+  pm25: number;  // truncated to 1 decimal
 }
 
-/**
- * EPA Table 6 — PM2.5 24-hour breakpoints (post-May 2024).
- *
- * Each row: { cLo, cHi, iLo, iHi, band }
- *  - cLo / cHi: PM2.5 concentration breakpoints in μg/m³ (truncated to 1 decimal)
- *  - iLo / iHi: AQI index breakpoints
- */
 interface Breakpoint {
   cLo: number;
   cHi: number;
@@ -42,36 +38,29 @@ interface Breakpoint {
   band: AqiBand;
 }
 
+/**
+ * Thai PCD PM2.5 breakpoints mapped to Thai AQI index.
+ * Linear interpolation within each band (same formula as EPA Equation 1).
+ */
 const PM25_BREAKPOINTS: readonly Breakpoint[] = [
-  { cLo: 0.0,   cHi: 9.0,   iLo: 0,   iHi: 50,  band: "Good" },
-  { cLo: 9.1,   cHi: 35.4,  iLo: 51,  iHi: 100, band: "Moderate" },
-  { cLo: 35.5,  cHi: 55.4,  iLo: 101, iHi: 150, band: "USG" },
-  { cLo: 55.5,  cHi: 125.4, iLo: 151, iHi: 200, band: "Unhealthy" },
-  { cLo: 125.5, cHi: 225.4, iLo: 201, iHi: 300, band: "VeryUnhealthy" },
-  { cLo: 225.5, cHi: 325.4, iLo: 301, iHi: 500, band: "Hazardous" },
+  { cLo: 0.0,  cHi: 15.0, iLo: 0,   iHi: 25,  band: "VeryGood"  },
+  { cLo: 15.1, cHi: 25.0, iLo: 26,  iHi: 50,  band: "Good"      },
+  { cLo: 25.1, cHi: 37.5, iLo: 51,  iHi: 100, band: "Moderate"  },
+  { cLo: 37.6, cHi: 75.0, iLo: 101, iHi: 200, band: "Sensitive" },
+  { cLo: 75.1, cHi: 300,  iLo: 201, iHi: 500, band: "Unhealthy" },
 ] as const;
 
-/**
- * Truncate PM2.5 to 1 decimal place per EPA spec (not round — truncate toward
- * negative infinity equivalent for non-negative values).
- */
 function truncatePm25(pm25: number): number {
   return Math.floor(pm25 * 10) / 10;
 }
 
 /**
- * Convert a PM2.5 24-hour concentration (μg/m³) to an EPA AQI integer.
- *
- * Algorithm (EPA Equation 1):
- *   I_p = ((I_Hi - I_Lo) / (BP_Hi - BP_Lo)) * (C_p - BP_Lo) + I_Lo
- *
- * Edge cases:
- *  - pm25 < 0      → clamp to 0  (defensive; sensors should never report this)
- *  - pm25 > 325.4  → clamp to AQI 500 (Hazardous category capped for display)
+ * Convert PM2.5 (μg/m³) to Thai AQI integer.
+ * Formula: I_p = ((I_Hi - I_Lo) / (BP_Hi - BP_Lo)) * (C_p - BP_Lo) + I_Lo
  */
 export function pm25ToAqi(pm25: number): number {
   if (!Number.isFinite(pm25) || pm25 < 0) return 0;
-  if (pm25 > 325.4) return 500;
+  if (pm25 > 300) return 500;
 
   const cp = truncatePm25(pm25);
 
@@ -83,28 +72,21 @@ export function pm25ToAqi(pm25: number): number {
     }
   }
 
-  // Unreachable: PM25_BREAKPOINTS spans [0, 325.4] and we clamped above.
   return 500;
 }
 
-/**
- * Map an AQI integer to its EPA band. Mirrors the boundaries in PM25_BREAKPOINTS
- * but accepts any AQI integer (e.g., from a different pollutant).
- */
+/** Map Thai AQI integer to Thai PCD band. */
 export function aqiToBand(aqi: number): AqiBand {
-  if (aqi <= 50) return "Good";
+  if (aqi <= 25)  return "VeryGood";
+  if (aqi <= 50)  return "Good";
   if (aqi <= 100) return "Moderate";
-  if (aqi <= 150) return "USG";
-  if (aqi <= 200) return "Unhealthy";
-  if (aqi <= 300) return "VeryUnhealthy";
-  return "Hazardous";
+  if (aqi <= 200) return "Sensitive";
+  return "Unhealthy";
 }
 
 /**
  * One-shot helper for components: take a possibly-null PM2.5 reading and
- * return an `AqiResult` or `null` (when no data is available).
- *
- * Strict null check — `pm25 === 0` is a valid reading (extremely clean air).
+ * return an AqiResult or null (when no data is available).
  */
 export function computeAqi(pm25: number | null | undefined): AqiResult | null {
   if (pm25 == null || !Number.isFinite(pm25)) return null;
@@ -122,53 +104,47 @@ export function computeAqi(pm25: number | null | undefined): AqiResult | null {
 // ──────────────────────────────────────────────────────────────────────────────
 
 const BAND_THAI_LABEL: Record<AqiBand, string> = {
-  Good: "ดี",
-  Moderate: "ปานกลาง",
-  USG: "กลุ่มเสี่ยง",
-  Unhealthy: "มีผลกระทบ",
-  VeryUnhealthy: "มีผลมาก",
-  Hazardous: "อันตราย",
+  VeryGood:  "ดีมาก",
+  Good:      "ดี",
+  Moderate:  "ปานกลาง",
+  Sensitive: "เริ่มมีผลต่อสุขภาพ",
+  Unhealthy: "มีผลต่อสุขภาพ",
 };
 
 /**
- * Hex colors aligned with the project's Tailwind theme tokens
- * (see `src/styles/theme.css` `--aqi-*` variables). If you change these, update
- * theme.css too — they must stay in sync.
+ * Thai PCD official colors.
+ * Also update src/styles/theme.css --aqi-* variables to match.
  */
 const BAND_COLOR: Record<AqiBand, string> = {
-  Good: "#0EA673",          // --aqi-good
-  Moderate: "#FBBF24",      // --aqi-moderate
-  USG: "#FB923C",           // --aqi-sensitive
-  Unhealthy: "#F87171",     // --aqi-poor
-  VeryUnhealthy: "#A855F7", // --aqi-bad
-  Hazardous: "#991B1B",     // --aqi-hazardous
+  VeryGood:  "#38BDF8", // ฟ้า  — --aqi-good
+  Good:      "#4ADE80", // เขียว — --aqi-moderate
+  Moderate:  "#FACC15", // เหลือง — --aqi-sensitive
+  Sensitive: "#FB923C", // ส้ม  — --aqi-poor
+  Unhealthy: "#EF4444", // แดง  — --aqi-bad
 };
 
 const BAND_TAILWIND_BG: Record<AqiBand, string> = {
-  Good: "bg-aqi-good",
-  Moderate: "bg-aqi-moderate",
-  USG: "bg-aqi-sensitive",
-  Unhealthy: "bg-aqi-poor",
-  VeryUnhealthy: "bg-aqi-bad",
-  Hazardous: "bg-aqi-hazardous",
+  VeryGood:  "bg-aqi-good",
+  Good:      "bg-aqi-moderate",
+  Moderate:  "bg-aqi-sensitive",
+  Sensitive: "bg-aqi-poor",
+  Unhealthy: "bg-aqi-bad",
 };
 
 const BAND_TAILWIND_TEXT: Record<AqiBand, string> = {
-  Good: "text-aqi-good",
-  Moderate: "text-aqi-moderate",
-  USG: "text-aqi-sensitive",
-  Unhealthy: "text-aqi-poor",
-  VeryUnhealthy: "text-aqi-bad",
-  Hazardous: "text-aqi-hazardous",
+  VeryGood:  "text-aqi-good",
+  Good:      "text-aqi-moderate",
+  Moderate:  "text-aqi-sensitive",
+  Sensitive: "text-aqi-poor",
+  Unhealthy: "text-aqi-bad",
 };
 
 const BAND_EMOJI: Record<AqiBand, string> = {
-  Good: "🟢",
-  Moderate: "🟡",
-  USG: "🟠",
+  VeryGood:  "🔵",
+  Good:      "🟢",
+  Moderate:  "🟡",
+  Sensitive: "🟠",
   Unhealthy: "🔴",
-  VeryUnhealthy: "🟣",
-  Hazardous: "⚫",
 };
 
 export function getBandThaiLabel(band: AqiBand): string {
@@ -192,7 +168,7 @@ export function getBandEmoji(band: AqiBand): string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Running advice & trend helpers
+// Running advice & exercise advisory (based on Thai AQI)
 // ──────────────────────────────────────────────────────────────────────────────
 
 export type RunAdviceLevel = "go" | "caution" | "stop";
@@ -205,10 +181,11 @@ export interface RunAdvice {
 }
 
 export function getRunAdvice(aqi: number): RunAdvice {
-  if (aqi <= 50) return { emoji: "💚", label: "วิ่งได้เลย!", sublabel: "อากาศดี", level: "go" };
-  if (aqi <= 100) return { emoji: "🌤", label: "วิ่งได้ ระวังตัวด้วย", sublabel: "อากาศปานกลาง", level: "caution" };
-  if (aqi <= 150) return { emoji: "😷", label: "กลุ่มเสี่ยงควรงดวิ่ง", sublabel: "ลดความหนักลง", level: "caution" };
-  return { emoji: "🚫", label: "วันนี้พักก่อนนะ", sublabel: "อากาศไม่ปลอดภัย", level: "stop" };
+  if (aqi <= 25)  return { emoji: "💚", label: "วิ่งได้เลย!",          sublabel: "อากาศดีมาก",             level: "go"      };
+  if (aqi <= 50)  return { emoji: "💚", label: "วิ่งได้เลย!",          sublabel: "อากาศดี",                level: "go"      };
+  if (aqi <= 100) return { emoji: "🌤", label: "วิ่งได้ ระวังตัวด้วย", sublabel: "อากาศปานกลาง",           level: "caution" };
+  if (aqi <= 200) return { emoji: "😷", label: "กลุ่มเสี่ยงควรงดวิ่ง", sublabel: "ลดความหนักลง ใส่หน้ากาก", level: "caution" };
+  return           { emoji: "🚫", label: "วันนี้พักก่อนนะ",           sublabel: "อากาศไม่ปลอดภัย",         level: "stop"    };
 }
 
 export type TrendDirection = "improving" | "stable" | "worsening";
@@ -220,17 +197,17 @@ export interface TrendInfo {
 
 export function getTrendArrow(current: number, previous: number): TrendInfo {
   const diff = current - previous;
-  if (diff > 10) return { arrow: "↑", direction: "worsening" };
-  if (diff < -10) return { arrow: "↓", direction: "improving" };
-  return { arrow: "→", direction: "stable" };
+  if (diff > 5)  return { arrow: "↑", direction: "worsening" };
+  if (diff < -5) return { arrow: "↓", direction: "improving" };
+  return              { arrow: "→", direction: "stable"    };
 }
 
 export function getExerciseAdvisory(aqi: number): string {
-  if (aqi <= 50) return "ออกกำลังกายได้ตามปกติ";
+  if (aqi <= 25)  return "ออกกำลังกายได้ตามปกติ";
+  if (aqi <= 50)  return "ออกกำลังกายได้ตามปกติ";
   if (aqi <= 100) return "วิ่งเบาๆ ได้ หลีกเลี่ยงวิ่งหนัก";
-  if (aqi <= 150) return "ลดเวลาออกกำลังกาย เลี่ยงกิจกรรมกลางแจ้ง";
-  if (aqi <= 200) return "งดออกกำลังกายกลางแจ้ง";
-  return "อยู่ในอาคาร งดกิจกรรมกลางแจ้งทั้งหมด";
+  if (aqi <= 200) return "ลดเวลาออกกำลังกาย ใส่หน้ากาก N95";
+  return "งดออกกำลังกายกลางแจ้งทั้งหมด";
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -248,7 +225,7 @@ export function formatRelativeTime(isoString: string | null | undefined): string
   if (!isoString) return "ไม่มีข้อมูล";
   const diffMs = Date.now() - new Date(isoString).getTime();
   const mins = Math.floor(diffMs / 60_000);
-  if (mins < 5) return "เมื่อสักครู่";
+  if (mins < 5)  return "เมื่อสักครู่";
   if (mins < 60) return `${mins} นาทีที่แล้ว`;
   const hours = Math.floor(mins / 60);
   return `${hours} ชั่วโมงที่แล้ว`;
@@ -261,8 +238,8 @@ export function formatRelativeTime(isoString: string | null | undefined): string
 const TREND_CACHE_KEY = "breeze_aqi_prev";
 
 interface AqiSnapshot {
-  values: Record<string, number>; // parkId → AQI
-  ts: number; // epoch ms
+  values: Record<string, number>; // parkId → Thai AQI
+  ts: number;                     // epoch ms
 }
 
 export function saveTrendSnapshot(parkAqis: Record<string, number>): void {
@@ -277,7 +254,6 @@ export function getPreviousAqi(parkId: string): number | null {
     const raw = localStorage.getItem(TREND_CACHE_KEY);
     if (!raw) return null;
     const snap: AqiSnapshot = JSON.parse(raw);
-    // Only use if snapshot is 10+ min old (not the same fetch cycle)
     if (Date.now() - snap.ts < 10 * 60 * 1000) return null;
     return snap.values[parkId] ?? null;
   } catch { return null; }

@@ -40,7 +40,15 @@ export interface ParkWithAqi extends Park {
   aqi_updated_at: string | null;
 }
 
-/** Legacy Thai PCD enum still written by `fetch-aqi`; FE ignores in favor of EPA band. */
+/**
+ * Legacy 5-band enum still written by `fetch-aqi` to `parks_with_aqi.aqi_status`
+ * (Good/Moderate/Poor/Bad/Hazardous on a 0–500 scale).
+ *
+ * The LIFF app ignores this column and re-derives Thai PCD bands from raw `pm25`
+ * via `computeAqi()`.  The admin SPA still reads it for filter chips.
+ *
+ * TODO: align with Thai PCD bands when fetch-aqi is rewritten — see follow-up.
+ */
 export type AqiStatusEnum = "Good" | "Moderate" | "Poor" | "Bad" | "Hazardous";
 
 // ─────────────────────────────────────────────────────────────────────────────
